@@ -1,78 +1,93 @@
 import smartpy as sp
 
-### Artwork data structure (sp.map)
-'''
-"artwork_name" = {
-    "artwork_type"  : type,
-    "artist_name"   : artist_name,
-    "creation_date" : date,
-    "current_owner" : owner,
-    "property1"     : ...,
-    "property2"     : ...
-}
-'''
-
 @sp.module
 def main():
-    
-    class Artist(sp.Contract):
-        def __init__(self, artist_name, artist_address):
-            self.data.artist_name = artist_name
-            self.data.admin = artist_address
-            self.data.artworks = {}
+    class MyContract(sp.Contract):
+        def __init__(self, artist_address):
+            self.data.artist = artist_address
+            self.data.artworks = sp.big_map()
+        
+        @sp.entry_point
+        def generate_certificate(self, params):
+            self.check_artwork_does_not_exist(params.id)
+            self.check_sender_is_artist()
+            self.data.artworks[params.id] = sp.record(
+                owner=self.data.artist,
+                sold=False,
+                properties=params.properties
+            )
 
-        @sp.private()
-        def art_types(self):
-            return sp.set("Drawing", "Painting", "Photography", "Sculpture")
+        @sp.entry_point
+        def modify_artwork(self, params):
+            artwork = self.get_artwork(params.id)
+            self.check_sender_is_owner_or_artist(artwork)
+            artwork.properties = params.properties
 
-        @sp.entrypoint
-        def add_artwork(self, artwork_name, artwork_type, date):
-            # First need to verify that the owner of the SC is calling the entrypoint
-            assert sp.sender == self.data.admin
-            # Check artwork type is known
-            assert self.art_types().contains(artwork_type)
-            # Verify that the artwork name is unique
-            for name in self.data.artworks.keys():
-                assert artwork_name != name
-                
-            sp.cast(artwork_name, sp.string)
-            self.data.artworks[artwork_name] = {
-                "artwork_type"  : artwork_type,
-                "artist_name"   : self.data.artist_name,
-                "creation_date" : date,                     # Type sp.timestamp creates an error, don't know how to cast to sp.string
-                "current_owner" : self.data.artist_name
-            }
+        @sp.entry_point
+        def transfer_artwork(self, params):
+            artwork = self.get_artwork(params.id)
+            self.check_sender_is_owner(artwork)
+            self.check_positive_price(params.purchase_price)
+            artwork.owner = params.new_owner
+            artwork.properties.last_purchase_price = params.purchase_price
+            self.data.artworks[params.id] = artwork
 
-        @sp.entrypoint
-        def add_property(self, artwork_name, property_name, value):
-            assert sp.sender == self.data.admin
-            sp.cast(property_name, sp.string)
-            sp.cast(value, sp.string)
-            self.data.artworks[artwork_name][property_name] = value
+        @sp.entry_point
+        def update_sale_price(self, params):
+            artwork = self.get_artwork(params.id)
+            self.check_sender_is_owner(artwork)
+            self.check_positive_price(params.sale_price)
+            artwork.properties.sale_price = params.sale_price
+            self.data.artworks[params.id] = artwork
+        
+        @sp.private(with_storage="read-only")
+        def check_artwork_does_not_exist(self, id):
+            assert not self.data.artworks.contains(id), "Artwork ID already exists"
 
+        @sp.private(with_storage="read-only")
+        def get_artwork(self, id):
+            assert self.data.artworks.contains(id), "Artwork does not exist"
+            return self.data.artworks[id]
+        
+        @sp.private(with_storage="read-only")
+        def check_sender_is_artist(self):
+            assert sp.sender == self.data.artist, "Sender is not the artist"
 
-@sp.add_test(name="Artist")
+        @sp.private
+        def check_sender_is_owner(self, artwork):
+            assert sp.sender == artwork.owner, "Not authorized"
+
+        @sp.private(with_storage="read-only")
+        def check_sender_is_owner_or_artist(self, artwork):
+            assert sp.sender == artwork.owner or sp.sender == self.data.artist, "Not authorized"
+
+        @sp.private
+        def check_positive_price(self, price):
+            assert price > 0, "Price must be positive"
+            
+@sp.add_test(name="Artwork Test")
 def test():
-    artist_address = sp.test_account("Picasso").address
-    bob_address = sp.test_account("Bob").address
-    
-    s = sp.test_scenario(main)
-    s.h1("Artist")
-    c1 = main.Artist("Picasso", artist_address)
-    s += c1
+    scenario = sp.test_scenario(main)
+    scenario.h1("Artwork Test")
 
-    c1.add_artwork(artwork_name = "Guernica", artwork_type = "Painting", date = "01-06-1937").run(sender = artist_address)
-    c1.add_property(artwork_name = "Guernica", property_name = "dimensions", value = "h:349 - w:777 (cm)").run(sender = artist_address)
+    artist_address = sp.address("tz1ArtistAddress1234567890")
+    buyer_address = sp.address("tz1BuyerAddress1234567890")
+    contract = main.MyContract(artist_address)
+    scenario += contract
 
-    ### Errors
-    # Adding artwork with same name
-    c1.add_artwork(artwork_name = "Guernica", artwork_type = "Drawing", date = "01-01-1950").run(sender = artist_address, valid = False)
-    # Adding artwork with invalid artwork type
-    c1.add_artwork(artwork_name = "Avatar", artwork_type = "Movie", date = "01-01-1950").run(sender = artist_address, valid = False)
-    # Trying to add property to none-existing artwork
-    c1.add_property(artwork_name = "Guernico", property_name = "dimensions", value = "h: 349cm - w: 777cm").run(sender = artist_address, valid = False)
-    # Adding artwork if not admin
-    c1.add_artwork(artwork_name = "Blabla", artwork_type = "Photography", date = "01-01-1950").run(sender = bob_address, valid = False)
-    # Adding property if not admin
-    c1.add_property(artwork_name = "Guernica", property_name = "weight", value = "5 kg").run(sender = bob_address, valid = False)
-
+    properties = sp.record(
+        title="Mona Lisa",
+        url="https://image.url",
+        creation_date=sp.now,
+        type="Painting",
+        styles=["Renaissance", "Portrait"],
+        sale_price=1000,
+        last_purchase_price=0,
+        dimensions="70x53 cm",
+        description="A masterpiece",
+        edition_number=1
+    )
+    contract.generate_certificate(id=1, properties=properties).run(sender=artist_address)
+    contract.transfer_artwork(id=1, new_owner=buyer_address, purchase_price=1100).run(sender=artist_address)
+    contract.update_sale_price(id=1, sale_price=2000).run(sender=artist_address, valid=False)
+    contract.update_sale_price(id=1, sale_price=1400).run(sender=buyer_address)
